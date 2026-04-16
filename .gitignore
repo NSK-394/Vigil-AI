@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Agent memory (persisted state — commit seed files explicitly if needed)
+data/memory/long_term.json
+
+# Generated CSVs — regenerated on every run
+data/logs.csv
+data/features.csv
+data/results.csv
+
+# Models / artefacts
+models/
+*.pkl
+*.joblib
+
+# Logs
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Streamlit
+.streamlit/secrets.toml
