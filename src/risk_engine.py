@@ -1,188 +1,84 @@
 """
-risk_engine.py
---------------
-Rule-based risk scoring engine for API abuse detection.
+risk_engine.py — Rule-based risk scoring engine.
 
-Takes per-api_key feature rows (from feature_extractor.py) and assigns:
-  - A numeric risk_score  (0 – 100)
-  - A human-readable label  LOW / MEDIUM / HIGH
-
-No ML yet — pure logic rules that mirror how a real SOC analyst thinks:
-  "This key made 800 requests per entry and only hit /login … that's sketchy."
+Scores each api_key 0–100 based on heuristic rules that mirror
+how a SOC analyst would flag suspicious behavior manually.
 """
 
+# ── Thresholds ─────────────────────────────────────────────────────────────
+AVG_REQ_LOW_THRESHOLD   = 50
+AVG_REQ_HIGH_THRESHOLD  = 200
+ENDPOINT_LOW_THRESHOLD  = 2
+ENDPOINT_MED_THRESHOLD  = 4
+VARIANCE_LOW_THRESHOLD  = 10
+VARIANCE_HIGH_THRESHOLD = 100
 
-# ──────────────────────────────────────────────
-#  THRESHOLDS  –  tweak these to tune sensitivity
-# ──────────────────────────────────────────────
-
-# average_requests: anything above this is suspicious
-AVG_REQ_LOW_THRESHOLD    = 50    # mild suspicion starts here
-AVG_REQ_HIGH_THRESHOLD   = 200   # strong suspicion above this
-
-# unique_endpoints: few endpoints = focused / automated behaviour
-ENDPOINT_LOW_THRESHOLD   = 2     # hitting only 1–2 endpoints is a red flag
-ENDPOINT_MED_THRESHOLD   = 4     # 3–4 endpoints is mildly suspicious
-
-# request_variance: near-zero = robotic (bots are perfectly consistent)
-VARIANCE_LOW_THRESHOLD   = 10    # very low variance → automated
-VARIANCE_HIGH_THRESHOLD  = 100   # high variance → human-like randomness
-
-# Label bands
 LABEL_LOW_MAX    = 30
 LABEL_MEDIUM_MAX = 70
-# anything above 70 → HIGH
 
 
-# ──────────────────────────────────────────────
-#  HELPER : single-feature scorers
-# ──────────────────────────────────────────────
+# ── Partial scorers ────────────────────────────────────────────────────────
 
 def _score_average_requests(avg: float) -> int:
-    """
-    High average requests per log entry → more risk.
-
-    Returns a partial score out of 40 points.
-    (We weight this highest because it's the strongest bot signal.)
-    """
-    if avg > AVG_REQ_HIGH_THRESHOLD:
-        return 40       # very high average → maximum points
-    elif avg > AVG_REQ_LOW_THRESHOLD:
-        return 20       # moderate average → half points
-    else:
-        return 0        # normal range → no points added
+    if avg > 40:
+        return 40
+    if avg > 20:
+        return 20
+    return 0
 
 
 def _score_unique_endpoints(unique: int) -> int:
-    """
-    Few unique endpoints → more risk.
-    Bots typically hammer 1–2 endpoints (login, search).
-
-    Returns a partial score out of 35 points.
-    """
-    if unique <= ENDPOINT_LOW_THRESHOLD:
-        return 35       # very focused → high risk contribution
-    elif unique <= ENDPOINT_MED_THRESHOLD:
-        return 15       # somewhat focused → moderate contribution
-    else:
-        return 0        # diverse browsing → normal behaviour
+    if unique == 1:
+        return 30
+    if unique <= 2:
+        return 15
+    return 0
 
 
 def _score_request_variance(variance: float) -> int:
-    """
-    Near-zero variance → robotic → more risk.
-    High variance → unpredictable → human-like → less risk.
-
-    Returns a partial score out of 25 points.
-    """
-    if variance < VARIANCE_LOW_THRESHOLD:
-        return 25       # near-zero variance → looks automated
-    elif variance < VARIANCE_HIGH_THRESHOLD:
-        return 10       # some variance but still a bit flat
-    else:
-        return 0        # lots of variance → natural human behaviour
+    if variance > 10:
+        return 20
+    if variance > 5:
+        return 10
+    return 0
 
 
-def _get_label(score: int) -> str:
-    """Convert a numeric score to a human-readable risk label."""
+def _label(score: int) -> str:
     if score <= LABEL_LOW_MAX:
         return "LOW"
-    elif score <= LABEL_MEDIUM_MAX:
+    if score <= LABEL_MEDIUM_MAX:
         return "MEDIUM"
-    else:
-        return "HIGH"
+    return "HIGH"
 
 
-# ──────────────────────────────────────────────
-#  MAIN FUNCTION
-# ──────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────────────
 
-def calculate_risk(features):
+def calculate_risk(features: list[dict]) -> list[dict]:
+    """
+    Apply heuristic rules to each feature row and return a risk assessment.
+
+    Args:
+        features: Output of feature_extractor.extract_features().
+
+    Returns:
+        List of dicts with keys: api_key, risk_score (0-100), label.
+    """
     results = []
-
     for f in features:
-        risk_score = 0
+        score = (
+            _score_average_requests(f["average_requests"])
+            + _score_unique_endpoints(f["unique_endpoints"])
+            + _score_request_variance(f["request_variance"])
+        )
+        # Extreme-volume bonus
+        if f["average_requests"] > 80:
+            score += 20
 
-        avg = f["average_requests"]
-        unique = f["unique_endpoints"]
-        var = f["request_variance"]
-
-        # Rule 1: High request frequency
-        if avg > 40:
-            risk_score += 40
-        elif avg > 20:
-            risk_score += 20
-
-        # Rule 2: Low endpoint diversity (bot behavior)
-        if unique == 1:
-            risk_score += 30
-        elif unique <= 2:
-            risk_score += 15
-
-        # Rule 3: High variance (irregular activity)
-        if var > 10:
-            risk_score += 20
-        elif var > 5:
-            risk_score += 10
-
-        # Bonus: extreme behavior
-        if avg > 80:
-            risk_score += 20
-
-        # Cap risk score at 100
-        risk_score = min(risk_score, 100)
-
-        # Labeling
-        if risk_score <= 30:
-            label = "LOW"
-        elif risk_score <= 70:
-            label = "MEDIUM"
-        else:
-            label = "HIGH"
-
+        score = min(score, 100)
         results.append({
-            "api_key": f["api_key"],
-            "risk_score": risk_score,
-            "label": label
+            "api_key":    f["api_key"],
+            "risk_score": score,
+            "label":      _label(score),
         })
 
     return results
-
-
-# ──────────────────────────────────────────────
-#  QUICK DEMO  –  runs only when executed directly
-# ──────────────────────────────────────────────
-
-if __name__ == "__main__":
-    try:
-        from simulator        import generate_logs
-        from feature_extractor import extract_features
-
-        logs     = generate_logs(500)
-        features = extract_features(logs)
-
-    except ImportError:
-        # Fallback: hand-crafted feature rows to test standalone
-        features = [
-            {"api_key": "bot_key_001",  "total_requests": 4500, "average_requests": 750.0, "unique_endpoints": 1, "request_variance": 3.2},
-            {"api_key": "bot_key_002",  "total_requests": 2100, "average_requests": 420.0, "unique_endpoints": 2, "request_variance": 8.5},
-            {"api_key": "user_key_010", "total_requests": 45,   "average_requests": 9.0,   "unique_endpoints": 5, "request_variance": 210.4},
-            {"api_key": "user_key_022", "total_requests": 90,   "average_requests": 18.0,  "unique_endpoints": 3, "request_variance": 55.0},
-        ]
-
-    results = calculate_risk(features)
-
-    # ── Pretty-print the output table ────────────────────────────────────
-    HIGH   = [r for r in results if r["label"] == "HIGH"]
-    MEDIUM = [r for r in results if r["label"] == "MEDIUM"]
-    LOW    = [r for r in results if r["label"] == "LOW"]
-
-    print(f"\n{'API KEY':<18}  {'RISK SCORE':>10}  {'LABEL':<8}")
-    print("─" * 42)
-
-    for r in results[:20]:                     # show top 20
-        # Add a visual indicator per label
-        icon = "🔴" if r["label"] == "HIGH" else "🟡" if r["label"] == "MEDIUM" else "🟢"
-        print(f"{r['api_key']:<18}  {r['risk_score']:>10}  {icon} {r['label']}")
-
-    print(f"\nSummary →  🔴 HIGH: {len(HIGH)}   🟡 MEDIUM: {len(MEDIUM)}   🟢 LOW: {len(LOW)}")

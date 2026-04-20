@@ -1,92 +1,84 @@
+"""
+decision_engine.py — Threshold-based action router.
+
+Evaluates each log's risk_score and dispatches the appropriate enforcement
+action. Used by the legacy alert_system pipeline; the agentic system routes
+actions through agents.decision_agent instead.
+"""
+
 import datetime
+
 try:
     import src.actions as actions
 except ImportError:
     import actions
 
-def calculate_severity(risk_score: float) -> str:
-    """
-    Maps a risk score (0-100) to a standardized severity band.
-      LOW      -> risk <= 50
-      MEDIUM   -> 51-70
-      HIGH     -> 71-85
-      CRITICAL -> >85
-    """
+
+def _severity(risk_score: float) -> str:
     if risk_score > 85:
         return actions.CRITICAL
-    elif risk_score > 70:
+    if risk_score > 70:
         return actions.HIGH
-    elif risk_score > 50:
+    if risk_score > 50:
         return actions.MEDIUM
-    else:
-        return actions.LOW
+    return actions.LOW
+
 
 def take_action(log: dict) -> dict:
     """
-    Evaluates an incoming log and decides the appropriate automated response,
-    mapping severity levels and executing mitigation actions.
-    
+    Evaluate a log entry and return a structured action response.
+
     Args:
-        log (dict): A log entry containing at minimum risk_score and api_key.
-        
+        log: Dict containing at minimum risk_score and api_key.
+
     Returns:
-        dict: A fully structured execution detail map determining the response.
+        Dict with keys: action, action_reason, message,
+                        risk_score, severity, timestamp.
     """
-    ip = log.get("ip_address", log.get("ip", "UNKNOWN_IP"))
-    api_key = log.get("api_key", "UNKNOWN_KEY")
+    ip         = log.get("ip_address", log.get("ip", "UNKNOWN_IP"))
+    api_key    = log.get("api_key", "UNKNOWN_KEY")
     risk_score = float(log.get("risk_score", 0))
-    
-    severity = calculate_severity(risk_score)
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+    severity   = _severity(risk_score)
+    timestamp  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     response = {
-        "action": "",
+        "action":        "",
         "action_reason": "",
-        "message": "",
-        "risk_score": risk_score,
-        "severity": severity,
-        "timestamp": timestamp
+        "message":       "",
+        "risk_score":    risk_score,
+        "severity":      severity,
+        "timestamp":     timestamp,
     }
 
-    # Action routing based purely on specified thresholds
     if risk_score > 80:
-        response["action"] = "BLOCK"
-        response["message"] = f"Key {api_key} blocked (Risk: {risk_score})."
-        response["action_reason"] = "Risk score exceeds 80; triggered immediate network-level block."
-        
+        response.update({
+            "action":        "BLOCK",
+            "message":       f"Key {api_key} blocked (risk: {risk_score}).",
+            "action_reason": "Risk score exceeds 80 — immediate network-level block.",
+        })
         actions.block_ip(ip, api_key, risk_score)
-        
+
     elif risk_score > 50:
-        response["action"] = "RATE_LIMIT"
-        response["message"] = f"API Key {api_key} rate limited (Risk: {risk_score})."
-        response["action_reason"] = "Risk score exceeds 50; traffic throttled to mitigate potential abuse."
-        
+        response.update({
+            "action":        "RATE_LIMIT",
+            "message":       f"Key {api_key} rate-limited (risk: {risk_score}).",
+            "action_reason": "Risk score exceeds 50 — traffic throttled.",
+        })
         actions.rate_limit(api_key, risk_score)
-        
+
     else:
-        response["action"] = "ALLOW"
-        response["message"] = f"Traffic allowed (Risk: {risk_score})."
-        response["action_reason"] = "Risk score within normal threshold; traffic cleared organically."
-        
+        response.update({
+            "action":        "ALLOW",
+            "message":       f"Traffic allowed (risk: {risk_score}).",
+            "action_reason": "Risk score within normal threshold.",
+        })
         actions.mark_normal(api_key)
-        
+
     return response
 
-def process_batch(logs: list) -> list:
-    """
-    Pipeline Integration: Iterates through a continuous stream or batch of logs,
-    applies the decision engine, and updates the logs linearly.
-    """
-    updated_logs = []
-    
+
+def process_batch(logs: list[dict]) -> list[dict]:
+    """Apply take_action to each log and return augmented records."""
     for log in logs:
-        # 1. Take action and generate the decision block
-        result = take_action(log)
-        
-        # 2. Update the original log directly with the response fields
-        log.update(result)
-        
-        # 3. Store the fully augmented log for downstream dashboard visualization
-        updated_logs.append(log)
-        
-    return updated_logs
+        log.update(take_action(log))
+    return logs

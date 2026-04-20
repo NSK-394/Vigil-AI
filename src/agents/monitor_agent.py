@@ -1,14 +1,10 @@
 """
-MonitorAgent — Observe phase of the agent loop.
+agents/monitor_agent.py — Observe phase of the agent loop.
 
-Responsibilities:
-  1. Generate fresh API logs (via simulator)
-  2. Extract per-key behavioral features (via feature_extractor)
-  3. Enrich each feature row with short-term + long-term memory context
-     so downstream agents see history, not just the current snapshot
-
-Note: simulator.generate_logs() uses a module-level TRAFFIC_MIX global.
-We patch it temporarily when the caller supplies a custom mix.
+Generates fresh API logs, extracts per-key features, and enriches each
+feature row with signals derived from short-term and long-term memory.
+The enriched output gives downstream agents historical context they need
+to make confident, memory-informed decisions.
 """
 
 from __future__ import annotations
@@ -17,88 +13,72 @@ from feature_extractor import extract_features
 
 
 class MonitorAgent:
-    """
-    Observe: ingest logs → extract features → enrich with memory.
-    Returns (enriched_features, raw_logs).
-    """
+    """Observe: ingest logs → extract features → enrich with memory context."""
 
     def __init__(self, short_term_memory, long_term_memory):
         self.stm = short_term_memory
         self.ltm = long_term_memory
 
-    # ── Public API ─────────────────────────────────────────────────────────
-
     def observe(
         self,
-        n_logs: int = 100,
-        traffic_mix: dict | None = None,
+        n_logs:      int             = 100,
+        traffic_mix: dict | None     = None,
     ) -> tuple[list[dict], list[dict]]:
         """
         Run one observation cycle.
 
         Args:
-            n_logs:       Number of log entries to generate this cycle.
+            n_logs:       Number of log entries to generate.
             traffic_mix:  Optional dict overriding simulator.TRAFFIC_MIX.
-                          e.g. {"normal": 0.2, "brute_force": 0.4,
-                                "scraping": 0.2, "ddos": 0.2}
-                          Values must sum to 1.0.
+                          Keys: normal, brute_force, scraping, ddos (must sum to 1.0).
 
         Returns:
             (enriched_features, raw_logs)
         """
         raw_logs = self._generate(n_logs, traffic_mix)
         features = extract_features(raw_logs)
-
         if not features:
             return [], raw_logs
+        return [self._enrich(f) for f in features], raw_logs
 
-        enriched = [self._enrich(f) for f in features]
-        return enriched, raw_logs
-
-    # ── Internal helpers ───────────────────────────────────────────────────
+    # ── Internal ───────────────────────────────────────────────────────────
 
     def _generate(self, n: int, traffic_mix: dict | None) -> list[dict]:
-        """Generate logs, temporarily patching the simulator mix if needed."""
-        if traffic_mix is not None:
-            original = dict(simulator.TRAFFIC_MIX)
-            simulator.TRAFFIC_MIX.update(traffic_mix)
-            try:
-                logs = simulator.generate_logs(n)
-            finally:
-                simulator.TRAFFIC_MIX.clear()
-                simulator.TRAFFIC_MIX.update(original)
-        else:
-            logs = simulator.generate_logs(n)
-        return logs
+        """Generate logs, temporarily patching simulator.TRAFFIC_MIX if needed."""
+        if traffic_mix is None:
+            return simulator.generate_logs(n)
+        original = dict(simulator.TRAFFIC_MIX)
+        simulator.TRAFFIC_MIX.update(traffic_mix)
+        try:
+            return simulator.generate_logs(n)
+        finally:
+            simulator.TRAFFIC_MIX.clear()
+            simulator.TRAFFIC_MIX.update(original)
 
     def _enrich(self, f: dict) -> dict:
         """
-        Attach memory-derived signals to a feature row.
+        Attach five memory-derived signals to a feature row.
 
         Added fields:
-            request_velocity   — how fast average_requests changed this window
-            historical_avg     — long-term EMA baseline for this key
-            baseline_deviation — % deviation from the key's own history
-            repeat_offender    — True if key has >= 3 prior HIGH verdicts
-            prior_observations — how many cycles this key has been tracked
+            request_velocity    — change in average_requests since last window
+            historical_avg      — long-term EMA baseline for this key
+            baseline_deviation  — % deviation from the key's historical norm
+            repeat_offender     — True if key has >= 3 prior HIGH verdicts
+            prior_observations  — total cycles this key has been tracked
         """
-        key = f["api_key"]
+        key         = f["api_key"]
         current_avg = f["average_requests"]
+        baseline    = self.ltm.get_baseline(key)
 
-        baseline   = self.ltm.get_baseline(key)
-        velocity   = self.stm.velocity(key, "average_requests")
-        hist_avg   = baseline.get("avg_requests", current_avg)
-        deviation  = self.ltm.deviation_from_baseline(key, current_avg)
-
-        # Record this cycle into the sliding window AFTER reading velocity
-        # so velocity reflects the *previous* window, not the current point
+        # Read velocity before recording so it reflects the previous window
+        velocity  = self.stm.velocity(key, "average_requests")
         self.stm.record(key, f)
 
         return {
             **f,
             "request_velocity":   round(velocity, 2),
-            "historical_avg":     round(hist_avg, 2),
-            "baseline_deviation": round(deviation, 2),
+            "historical_avg":     round(baseline.get("avg_requests", current_avg), 2),
+            "baseline_deviation": round(self.ltm.deviation_from_baseline(key, current_avg), 2),
             "repeat_offender":    self.ltm.is_repeat_offender(key),
             "prior_observations": baseline.get("observations", 0),
         }
