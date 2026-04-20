@@ -34,14 +34,22 @@ class AgentLoop:
         self._results_path = results_path
         self._cycle        = 0
 
-    def run(self, n_logs: int = 100, traffic_mix: dict | None = None) -> dict:
+    def run(
+        self,
+        n_logs:      int          = 100,
+        traffic_mix: dict | None  = None,
+        source:      str          = "simulated",
+    ) -> dict:
         """
         Execute one full cycle and return a result dict with keys:
             cycle, logs, features, decisions, alerts, stats
+
+        Args:
+            source: "simulated" (default) or "real" (drains api_server buffer).
         """
         self._cycle += 1
 
-        enriched_features, raw_logs = self._monitor.observe(n_logs, traffic_mix)
+        enriched_features, raw_logs = self._monitor.observe(n_logs, traffic_mix, source)
         if not enriched_features:
             return self._empty_result(raw_logs)
 

@@ -327,6 +327,8 @@ LOG_POOL = [
 def _init_state():
     if "mode" not in st.session_state:
         st.session_state.mode = "normal"
+    if "source" not in st.session_state:
+        st.session_state.source = "simulated"   # "simulated" | "real"
     if "agent_loop" not in st.session_state:
         os.makedirs("data/memory", exist_ok=True)
         st.session_state["agent_loop"] = AgentLoop(
@@ -344,11 +346,14 @@ _init_state()
 # ── Run one agent cycle ───────────────────────────────────────────────────────
 
 def _run_cycle() -> dict:
-    loop = st.session_state["agent_loop"]
-    mode = st.session_state.mode
+    loop   = st.session_state["agent_loop"]
+    mode   = st.session_state.mode
+    source = st.session_state.source
     os.makedirs("data", exist_ok=True)
+    # traffic_mix only applies in simulated mode; ignored when source="real"
+    mix = TRAFFIC_PRESETS[mode] if source == "simulated" else None
     try:
-        result = loop.run(n_logs=100, traffic_mix=TRAFFIC_PRESETS[mode])
+        result = loop.run(n_logs=100, traffic_mix=mix, source=source)
         st.session_state["cycle"] += 1
         return result
     except Exception as e:
@@ -720,18 +725,22 @@ def render_alerts(alerts: list, blocked_keys: list):
 
 
 # ── Main layout ───────────────────────────────────────────────────────────────
-# Buttons MUST come before _run_cycle() so their click is captured before data runs.
+# All buttons MUST come before _run_cycle() so clicks are captured this frame.
 
-_btn_lbl, _btn_sus, _btn_atk = st.columns([1, 1, 1])
-with _btn_lbl:
+_c1, _c2, _c3, _spacer, _src_col = st.columns([1, 1, 1, 0.3, 1.4])
+with _c1:
     if st.button("Normal", key="btn_normal", use_container_width=True):
         st.session_state.mode = "normal"
-with _btn_sus:
+with _c2:
     if st.button("Suspicious", key="btn_sus", use_container_width=True):
         st.session_state.mode = "suspicious"
-with _btn_atk:
+with _c3:
     if st.button("Attack", key="btn_attack", use_container_width=True):
         st.session_state.mode = "attack"
+with _src_col:
+    _src_label = "🟢 Real Traffic" if st.session_state.source == "real" else "⚙️ Simulated"
+    if st.button(_src_label, key="btn_source", use_container_width=True):
+        st.session_state.source = "real" if st.session_state.source == "simulated" else "simulated"
 
 result       = _run_cycle()
 logs_df      = pd.DataFrame(result.get("logs", []))

@@ -1,10 +1,12 @@
 """
 agents/monitor_agent.py — Observe phase of the agent loop.
 
-Generates fresh API logs, extracts per-key features, and enriches each
-feature row with signals derived from short-term and long-term memory.
-The enriched output gives downstream agents historical context they need
-to make confident, memory-informed decisions.
+Supports two data sources:
+    "simulated" — generate synthetic logs via simulator (default, demo mode)
+    "real"      — drain real request logs captured by api_server middleware
+
+Both paths produce identically-shaped log dicts so feature_extractor and all
+downstream agents are completely unaware of the source.
 """
 
 from __future__ import annotations
@@ -19,32 +21,47 @@ class MonitorAgent:
         self.stm = short_term_memory
         self.ltm = long_term_memory
 
+    # ── Public API ─────────────────────────────────────────────────────────
+
     def observe(
         self,
-        n_logs:      int             = 100,
-        traffic_mix: dict | None     = None,
+        n_logs:      int          = 100,
+        traffic_mix: dict | None  = None,
+        source:      str          = "simulated",
     ) -> tuple[list[dict], list[dict]]:
         """
         Run one observation cycle.
 
         Args:
-            n_logs:       Number of log entries to generate.
-            traffic_mix:  Optional dict overriding simulator.TRAFFIC_MIX.
-                          Keys: normal, brute_force, scraping, ddos (must sum to 1.0).
+            n_logs:       Max logs to consume (simulated: exact count; real: upper bound).
+            traffic_mix:  Simulator traffic distribution override (simulated only).
+            source:       "simulated" or "real".
 
         Returns:
             (enriched_features, raw_logs)
         """
-        raw_logs = self._generate(n_logs, traffic_mix)
+        if source == "real":
+            raw_logs = self._generate_real(n_logs)
+        else:
+            raw_logs = self._generate_simulated(n_logs, traffic_mix)
+
         features = extract_features(raw_logs)
         if not features:
             return [], raw_logs
         return [self._enrich(f) for f in features], raw_logs
 
+    def ingest_log(self, log_dict: dict) -> None:
+        """
+        Push a single external log dict directly into the api_server buffer.
+        Useful for tests, webhooks, or custom integrations.
+        """
+        from api_server import ingest_log as _push
+        _push(log_dict)
+
     # ── Internal ───────────────────────────────────────────────────────────
 
-    def _generate(self, n: int, traffic_mix: dict | None) -> list[dict]:
-        """Generate logs, temporarily patching simulator.TRAFFIC_MIX if needed."""
+    def _generate_simulated(self, n: int, traffic_mix: dict | None) -> list[dict]:
+        """Generate synthetic logs, temporarily patching simulator.TRAFFIC_MIX if needed."""
         if traffic_mix is None:
             return simulator.generate_logs(n)
         original = dict(simulator.TRAFFIC_MIX)
@@ -54,6 +71,16 @@ class MonitorAgent:
         finally:
             simulator.TRAFFIC_MIX.clear()
             simulator.TRAFFIC_MIX.update(original)
+
+    def _generate_real(self, max_logs: int) -> list[dict]:
+        """
+        Drain up to max_logs entries from the api_server shared buffer.
+        Returns an empty list (not an error) when the buffer is empty —
+        the caller's extract_features will produce no features and the
+        agent loop returns an empty-result dict for that cycle.
+        """
+        from api_server import drain_logs
+        return drain_logs(max_logs)
 
     def _enrich(self, f: dict) -> dict:
         """
@@ -71,7 +98,7 @@ class MonitorAgent:
         baseline    = self.ltm.get_baseline(key)
 
         # Read velocity before recording so it reflects the previous window
-        velocity  = self.stm.velocity(key, "average_requests")
+        velocity = self.stm.velocity(key, "average_requests")
         self.stm.record(key, f)
 
         return {
