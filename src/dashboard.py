@@ -436,12 +436,17 @@ def render_topbar(mode: str, cycle: int, total_keys: int):
         </div>""", unsafe_allow_html=True)
 
     with col_status:
+        try:
+            from live_queue import queue_size as _qs
+            _q = _qs()
+            _queue_line = f'QUEUE: <span style="color:{"var(--green)" if _q == 0 else "var(--yellow)"}">{_q} pending</span><br>'
+        except Exception:
+            _queue_line = ""
         st.markdown(f"""
         <div style="text-align:right; padding-top:10px; font-size:0.72rem; color:var(--muted);
                     font-family:'JetBrains Mono',monospace; line-height:2">
             STATUS: <span style="color:var(--green); font-weight:600">ONLINE</span><br>
-            LATENCY: {random.randint(8,28)}ms<br>
-            LAST SCAN: {now.strftime("%H:%M:%S")}
+            {_queue_line}LAST SCAN: {now.strftime("%H:%M:%S")}
         </div>""", unsafe_allow_html=True)
 
 
@@ -465,6 +470,10 @@ def render_kpi_strip(total_keys, high_count, medium_count, low_count, total_reqs
 
 
 def render_threat_table(sorted_results: pd.DataFrame):
+    if sorted_results.empty:
+        st.markdown('<div style="color:var(--muted); font-size:0.75rem; padding:8px 0">'
+                    'Waiting for data…</div>', unsafe_allow_html=True)
+        return
     rows_html = ""
     for _, row in sorted_results.head(15).iterrows():
         label  = str(row["final_label"])
@@ -636,6 +645,10 @@ def render_roster(results_df: pd.DataFrame):
         f = st.selectbox("Filter by level", ["ALL", "HIGH", "MEDIUM", "LOW"],
                          label_visibility="collapsed")
     df = (results_df if f == "ALL" else results_df[results_df["final_label"] == f])
+    if df.empty or "risk_score" not in df.columns:
+        st.markdown('<div style="color:var(--muted); font-size:0.75rem; padding:8px 0">'
+                    'No data for this cycle.</div>', unsafe_allow_html=True)
+        return
     df = df.sort_values("risk_score", ascending=False).reset_index(drop=True)
 
     rows = ""
@@ -742,15 +755,29 @@ with _src_col:
     if st.button(_src_label, key="btn_source", use_container_width=True):
         st.session_state.source = "real" if st.session_state.source == "simulated" else "simulated"
 
-result       = _run_cycle()
-logs_df      = pd.DataFrame(result.get("logs", []))
-results_df   = pd.DataFrame(result.get("decisions", []))
-decisions    = result.get("decisions", [])
-alerts       = result.get("alerts", [])
-stats        = result.get("stats", {})
-blocked      = st.session_state["agent_loop"].blocked_keys()
-mode         = st.session_state.mode
-cycle        = st.session_state["cycle"]
+result    = _run_cycle()
+source    = st.session_state.source
+_is_empty = not result.get("decisions")
+
+# When real-traffic buffer is empty, fall back to the last known good result
+# so the dashboard doesn't go blank between request bursts.
+if _is_empty and "last_result" in st.session_state:
+    result    = st.session_state["last_result"]
+    _stale    = True
+elif not _is_empty:
+    st.session_state["last_result"] = result
+    _stale = False
+else:
+    _stale = False
+
+logs_df    = pd.DataFrame(result.get("logs", []))
+results_df = pd.DataFrame(result.get("decisions", []))
+decisions  = result.get("decisions", [])
+alerts     = result.get("alerts", [])
+stats      = result.get("stats", {})
+blocked    = st.session_state["agent_loop"].blocked_keys()
+mode       = st.session_state.mode
+cycle      = st.session_state["cycle"]
 
 high_count   = int((results_df["final_label"] == "HIGH").sum())   if not results_df.empty else 0
 medium_count = int((results_df["final_label"] == "MEDIUM").sum()) if not results_df.empty else 0
@@ -761,10 +788,27 @@ avg_conf     = float(stats.get("avg_confidence", 0.0))
 
 label_order    = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 sorted_results = results_df.copy()
-if not sorted_results.empty:
+if not sorted_results.empty and "final_label" in sorted_results.columns and "risk_score" in sorted_results.columns:
     sorted_results["_ord"] = sorted_results["final_label"].map(label_order)
     sorted_results = sorted_results.sort_values(["_ord", "risk_score"],
                                                 ascending=[True, False]).drop(columns="_ord")
+
+# Status banner — real-traffic waiting / stale notice
+if source == "real" and _is_empty and "last_result" not in st.session_state:
+    st.markdown("""
+    <div style="background:#1c2128; border:1px solid #d29922; border-left:3px solid #d29922;
+                border-radius:6px; padding:10px 16px; font-size:0.78rem; color:#d29922; margin-bottom:8px">
+        ⚠️ <strong>Real Traffic mode</strong> — buffer empty. Start the FastAPI server and send requests:<br>
+        <code style="color:#e6edf3; font-size:0.72rem">uvicorn src.api_server:app --port 8000</code>
+        &nbsp;·&nbsp;
+        <code style="color:#e6edf3; font-size:0.72rem">python scripts/attack.py --mode all</code>
+    </div>""", unsafe_allow_html=True)
+elif source == "real" and _stale:
+    st.markdown("""
+    <div style="background:#1c2128; border:1px solid #30363d; border-left:3px solid #58a6ff;
+                border-radius:6px; padding:8px 16px; font-size:0.72rem; color:#7d8590; margin-bottom:8px">
+        🕐 Real Traffic — showing last cycle's data · waiting for new requests
+    </div>""", unsafe_allow_html=True)
 
 # ── Render ────────────────────────────────────────────────────────────────────
 

@@ -1,30 +1,41 @@
 """
 api_server.py — FastAPI ingestion server for VigilAI.
 
-Captures real API traffic via middleware and feeds it into the shared
-log buffer. MonitorAgent drains this buffer on each observe() cycle
-when source="real".
+Every incoming HTTP request is timed and logged into the shared SQLite queue
+(live_queue.py). The Streamlit dashboard drains that queue each cycle via
+MonitorAgent, so the two processes never share in-memory state.
 
-Run alongside the dashboard:
-    uvicorn src.api_server:app --host 0.0.0.0 --port 8000 --reload
+Start with:
+    python run_server.py
+  or:
+    cd src && uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
 
-Test endpoints are live at:
-    GET  /api/login
-    POST /api/login
-    GET  /api/products
-    GET  /api/user
-    GET  /health
+Test endpoints:
+    GET/POST  /api/login
+    GET       /api/products
+    GET       /api/user
+    GET       /api/search
+    GET       /api/orders
+    GET       /health          ← returns queue depth
 """
 
 from __future__ import annotations
 
+import sys
+import os
 import time
-from collections import deque
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# Ensure src/ is on the path when uvicorn is launched from the project root
+_src = os.path.dirname(os.path.abspath(__file__))
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+
+from live_queue import push, queue_size
 
 app = FastAPI(title="VigilAI Ingestion Server", docs_url="/docs")
 
@@ -35,38 +46,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Shared log buffer ─────────────────────────────────────────────────────────
-# Thread-safe for single-writer (middleware) + single-reader (MonitorAgent).
-# deque.append / deque.popleft are atomic under CPython's GIL.
-_LOG_BUFFER: deque[dict] = deque(maxlen=50_000)
-
-
-def get_buffer() -> deque[dict]:
-    """Return the module-level log buffer (used by MonitorAgent)."""
-    return _LOG_BUFFER
-
-
-def ingest_log(log: dict) -> None:
-    """
-    Push a pre-built log dict directly into the buffer.
-    Use this for programmatic injection (tests, external integrations).
-    The dict must contain at minimum: api_key, endpoint, request_count.
-    """
-    _LOG_BUFFER.append(_normalize_external(log))
-
-
-def drain_logs(max_items: int = 5000) -> list[dict]:
-    """
-    Pop up to max_items logs from the buffer and return them.
-    Called by MonitorAgent._generate_real() on each observe cycle.
-    """
-    batch = []
-    for _ in range(min(max_items, len(_LOG_BUFFER))):
-        try:
-            batch.append(_LOG_BUFFER.popleft())
-        except IndexError:
-            break
-    return batch
+# ── Endpoints to skip logging (internal / health) ─────────────────────────────
+_SKIP_PATHS = {"/docs", "/openapi.json", "/health", "/favicon.ico"}
 
 
 # ── Middleware ────────────────────────────────────────────────────────────────
@@ -74,46 +55,46 @@ def drain_logs(max_items: int = 5000) -> list[dict]:
 @app.middleware("http")
 async def capture_request(request: Request, call_next):
     """
-    Intercept every request, time it, and push a normalized log entry
-    into the shared buffer after the response is generated.
+    Intercept every non-internal request, measure latency, and push a
+    normalised log dict into the shared SQLite queue.
     """
-    start = time.perf_counter()
+    start    = time.perf_counter()
     response = await call_next(request)
     latency  = round(time.perf_counter() - start, 4)
 
-    api_key = (
-        request.headers.get("x-api-key")
-        or request.headers.get("authorization", "").replace("Bearer ", "")
-        or request.query_params.get("api_key")
-        or "anonymous"
-    )
+    if request.url.path not in _SKIP_PATHS:
+        api_key = (
+            request.headers.get("x-api-key")
+            or request.headers.get("authorization", "").replace("Bearer ", "").strip()
+            or request.query_params.get("api_key")
+            or "anonymous"
+        )
 
-    log = {
-        "api_key":       api_key,
-        "endpoint":      request.url.path,
-        "method":        request.method,
-        "status":        response.status_code,
-        "latency":       latency,
-        "ip_address":    request.client.host if request.client else "unknown",
-        "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        # Normalized fields expected by feature_extractor
-        "request_count": 1,
-        "attack_type":   "real",
-    }
-
-    # Skip internal FastAPI routes to avoid noise
-    if not request.url.path.startswith(("/docs", "/openapi", "/health")):
-        _LOG_BUFFER.append(log)
+        log = {
+            "api_key":       api_key,
+            "endpoint":      request.url.path,
+            "method":        request.method,
+            "status":        response.status_code,
+            "latency":       latency,
+            "ip_address":    request.client.host if request.client else "unknown",
+            "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            # Fields expected by feature_extractor
+            "request_count": 1,
+            "attack_type":   "real",
+        }
+        push(log)
 
     return response
 
 
-# ── Test endpoints ────────────────────────────────────────────────────────────
+# ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "buffer_size": len(_LOG_BUFFER)}
+    return {"status": "ok", "queue_depth": queue_size()}
 
+
+# ── Test endpoints ────────────────────────────────────────────────────────────
 
 @app.get("/api/login")
 @app.post("/api/login")
@@ -128,8 +109,7 @@ async def products():
 
 @app.get("/api/user")
 async def user_profile(request: Request):
-    api_key = request.headers.get("x-api-key", "anonymous")
-    return JSONResponse({"user": api_key, "role": "standard"})
+    return JSONResponse({"user": request.headers.get("x-api-key", "anonymous")})
 
 
 @app.get("/api/search")
@@ -140,20 +120,3 @@ async def search(q: str = ""):
 @app.get("/api/orders")
 async def orders():
     return JSONResponse({"orders": []})
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
-def _normalize_external(log: dict) -> dict:
-    """Ensure manually-ingested dicts have all required fields."""
-    return {
-        "api_key":       log.get("api_key", "unknown"),
-        "endpoint":      log.get("endpoint", "/unknown"),
-        "request_count": int(log.get("request_count", log.get("count", 1))),
-        "timestamp":     log.get("timestamp", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
-        "ip_address":    log.get("ip_address", "0.0.0.0"),
-        "method":        log.get("method", "GET"),
-        "status":        int(log.get("status", 200)),
-        "latency":       float(log.get("latency", 0.0)),
-        "attack_type":   log.get("attack_type", "real"),
-    }

@@ -3,7 +3,8 @@ agents/monitor_agent.py — Observe phase of the agent loop.
 
 Supports two data sources:
     "simulated" — generate synthetic logs via simulator (default, demo mode)
-    "real"      — drain real request logs captured by api_server middleware
+    "real"      — drain real request logs from the shared SQLite queue
+                  written by the FastAPI server (api_server.py / live_queue.py)
 
 Both paths produce identically-shaped log dicts so feature_extractor and all
 downstream agents are completely unaware of the source.
@@ -25,25 +26,26 @@ class MonitorAgent:
 
     def observe(
         self,
-        n_logs:      int          = 100,
-        traffic_mix: dict | None  = None,
-        source:      str          = "simulated",
+        n_logs:      int         = 100,
+        traffic_mix: dict | None = None,
+        source:      str         = "simulated",
     ) -> tuple[list[dict], list[dict]]:
         """
         Run one observation cycle.
 
         Args:
-            n_logs:       Max logs to consume (simulated: exact count; real: upper bound).
-            traffic_mix:  Simulator traffic distribution override (simulated only).
+            n_logs:       Max logs to consume (simulated: exact; real: upper bound).
+            traffic_mix:  Simulator traffic-mix override (simulated source only).
             source:       "simulated" or "real".
 
         Returns:
             (enriched_features, raw_logs)
         """
-        if source == "real":
-            raw_logs = self._generate_real(n_logs)
-        else:
-            raw_logs = self._generate_simulated(n_logs, traffic_mix)
+        raw_logs = (
+            self._generate_real(n_logs)
+            if source == "real"
+            else self._generate_simulated(n_logs, traffic_mix)
+        )
 
         features = extract_features(raw_logs)
         if not features:
@@ -52,11 +54,11 @@ class MonitorAgent:
 
     def ingest_log(self, log_dict: dict) -> None:
         """
-        Push a single external log dict directly into the api_server buffer.
-        Useful for tests, webhooks, or custom integrations.
+        Push a single log dict into the shared SQLite queue.
+        Useful for tests, webhooks, or external integrations.
         """
-        from api_server import ingest_log as _push
-        _push(log_dict)
+        from live_queue import push
+        push(log_dict)
 
     # ── Internal ───────────────────────────────────────────────────────────
 
@@ -74,13 +76,13 @@ class MonitorAgent:
 
     def _generate_real(self, max_logs: int) -> list[dict]:
         """
-        Drain up to max_logs entries from the api_server shared buffer.
-        Returns an empty list (not an error) when the buffer is empty —
-        the caller's extract_features will produce no features and the
-        agent loop returns an empty-result dict for that cycle.
+        Drain up to max_logs entries from the shared SQLite queue.
+        Returns an empty list when the queue has no pending entries — not an error.
+        The caller's extract_features() will return nothing and the agent loop
+        will emit an empty-result dict, which the dashboard handles gracefully.
         """
-        from api_server import drain_logs
-        return drain_logs(max_logs)
+        from live_queue import drain
+        return drain(max_logs)
 
     def _enrich(self, f: dict) -> dict:
         """
