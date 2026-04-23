@@ -8,7 +8,7 @@ alert dicts, updates long-term memory (feedback loop), and persists results to C
 from __future__ import annotations
 import time
 
-from alert_system import block_api_key, blocked_keys
+from alert_system import block_api_key, blocked_keys, send_slack_alert, send_email_alert
 from storage      import save_results
 
 _SEVERITY_MAP = {
@@ -47,6 +47,11 @@ class ResponseAgent:
 
             if action == "BLOCK":
                 block_api_key(key)
+                try:
+                    send_slack_alert(d["final_label"], key, d.get("reasoning", ""))
+                    send_email_alert(d["final_label"], key, d.get("reasoning", ""))
+                except Exception as exc:
+                    print(f"[response_agent] Alert dispatch error: {exc}")
 
             if action != "LOG":
                 new_alerts.append(self._build_alert(d))

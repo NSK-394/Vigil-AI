@@ -129,6 +129,44 @@ python run_agent.py --mode suspicious --cycles 10 --interval 2
 
 ---
 
+## Production Integration
+
+### FastAPI (Python)
+
+Add VigilAI monitoring to any existing FastAPI app in 3 lines:
+
+```python
+from src.middleware.fastapi_middleware import VigilMiddleware
+app = FastAPI()
+app.add_middleware(VigilMiddleware, vigil_url="http://localhost:9000/ingest")
+```
+
+Then start the ingest server in a separate terminal:
+
+```bash
+uvicorn src.middleware.ingest_server:app --host 0.0.0.0 --port 9000
+```
+
+### Express (Node.js)
+
+```javascript
+const { createVigilMiddleware } = require('./src/middleware/express_middleware');
+const app = express();
+app.use(createVigilMiddleware({ vigilUrl: 'http://localhost:9000/ingest' }));
+```
+
+The Express middleware uses only Node.js built-in modules — no npm installs needed.
+
+### Alert Setup
+
+1. Copy `.env.example` to `.env` and fill in your values
+2. **Slack** — create an incoming webhook at https://api.slack.com/messaging/webhooks and paste the URL as `SLACK_WEBHOOK_URL`
+3. **Email** — enable 2FA on your Gmail account, generate an App Password at https://myaccount.google.com/apppasswords, then set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD`
+
+Alerts fire automatically whenever a key is BLOCKed (HIGH verdict or repeat-offender escalation) — no code changes required. Both channels run in background threads and never slow down the detection pipeline.
+
+---
+
 ## Demo Scenarios
 
 Click the buttons in the top bar to switch scenarios instantly:

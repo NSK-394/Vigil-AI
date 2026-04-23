@@ -13,10 +13,11 @@ env/
 # Agent memory (persisted state — commit seed files explicitly if needed)
 data/memory/long_term.json
 
-# Generated CSVs — regenerated on every run
+# Generated CSVs and runtime databases — regenerated on every run
 data/logs.csv
 data/features.csv
 data/results.csv
+data/live_queue.db
 
 # Models / artefacts
 models/
@@ -36,3 +37,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Environment secrets — never commit
+.env

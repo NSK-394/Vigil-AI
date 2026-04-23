@@ -4,9 +4,24 @@ alert_system.py — Alert generation and in-memory WAF block list.
 Provides the simulated firewall state (blocked_keys) shared across
 the pipeline, plus generate_alerts() for the legacy pipeline path.
 The agentic system calls block_api_key() directly via ResponseAgent.
+
+External alerting (Slack, email) is triggered by ResponseAgent on BLOCK actions.
+Credentials are read from environment variables; missing vars are silently ignored.
 """
 
-from datetime import datetime
+import os
+import smtplib
+import threading
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
+
+import httpx
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # In-memory firewall block list — persists for the lifetime of the process.
 # In production this would be a Redis set or WAF rule store.
@@ -28,6 +43,73 @@ def unblock_api_key(api_key: str) -> None:
 def get_blocked_keys() -> list[str]:
     """Return a sorted list of all currently blocked API keys."""
     return sorted(blocked_keys)
+
+
+def send_slack_alert(verdict: str, api_key: str, reasoning: str) -> None:
+    """
+    Fire-and-forget Slack alert via incoming webhook.
+    Silently no-ops when SLACK_WEBHOOK_URL is not set.
+    Runs in a daemon thread — never blocks or crashes the agent pipeline.
+    """
+    def _post() -> None:
+        webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+        if not webhook:
+            return
+        payload = {
+            "text": (
+                f"🚨 VigilAI Alert\n"
+                f"Key: {api_key}\n"
+                f"Verdict: {verdict}\n"
+                f"Reason: {reasoning}"
+            )
+        }
+        try:
+            resp = httpx.post(webhook, json=payload, timeout=5.0)
+            print(f"[alert_system] Slack alert sent — HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[alert_system] Slack alert failed: {exc}")
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def send_email_alert(verdict: str, api_key: str, reasoning: str) -> None:
+    """
+    Fire-and-forget email alert via Gmail SMTP.
+    Silently no-ops when GMAIL_ADDRESS or GMAIL_APP_PASSWORD are not set.
+    Requires a Gmail App Password (2FA must be enabled on the account).
+    Runs in a daemon thread — never blocks or crashes the agent pipeline.
+    """
+    def _send() -> None:
+        addr     = os.environ.get("GMAIL_ADDRESS", "")
+        password = os.environ.get("GMAIL_APP_PASSWORD", "")
+        if not addr or not password:
+            return
+
+        now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        body = (
+            f"VigilAI Security Alert\n"
+            f"======================\n"
+            f"API Key : {api_key}\n"
+            f"Verdict : {verdict}\n"
+            f"Reason  : {reasoning}\n"
+            f"Time    : {now}\n"
+        )
+        msg            = MIMEText(body, "plain")
+        msg["Subject"] = f"VigilAI Alert — {verdict} detected"
+        msg["From"]    = addr
+        msg["To"]      = addr
+
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(addr, password)
+                smtp.sendmail(addr, addr, msg.as_string())
+            print(f"[alert_system] Email alert sent to {addr}")
+        except Exception as exc:
+            print(f"[alert_system] Email alert failed: {exc}")
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ── Action labels used by the legacy pipeline ──────────────────────────────
