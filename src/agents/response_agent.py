@@ -6,7 +6,7 @@ alert dicts, updates long-term memory (feedback loop), and persists results to C
 """
 
 from __future__ import annotations
-import time
+from datetime import datetime, timezone
 
 from alert_system import block_api_key, blocked_keys, send_slack_alert, send_email_alert
 from storage      import save_results
@@ -67,7 +67,7 @@ class ResponseAgent:
 
     def _build_alert(self, d: dict) -> dict:
         return {
-            "timestamp":     time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "severity":      _SEVERITY_MAP.get(d["action"], "INFO"),
             "api_key":       d["api_key"],
             "action":        d["action"],

@@ -101,8 +101,17 @@ Most detection systems are stateless pipelines: data goes in, a score comes out.
 | Reasoning Traces | Every verdict includes a full explanation of which signals fired |
 | Repeat Offender Detection | Keys with 3+ HIGH verdicts auto-escalate on future cycles |
 | Action Prioritization | BLOCK > RATE_LIMIT > ALERT > LOG — context-sensitive |
-| Live SOC Dashboard | Terminal-noir Streamlit UI with CRT scanlines, phosphor green |
+| Live SOC Dashboard | Real-time Streamlit UI with KPI cards, threat table, and reasoning panel |
+| Sparkline Trend | Per-cycle HIGH threat count history visualised as a Unicode sparkline in the topbar |
+| Delta KPI Indicators | Each KPI card shows a ▲/▼ change vs. the previous cycle |
+| Session Totals | Cumulative threats and alerts fired since the dashboard started |
+| Error Banners | Agent cycle exceptions surface as a visible banner instead of silent failures |
+| Real Traffic Mode | Drop-in FastAPI/Express middleware streams live HTTP traffic into the detection pipeline |
+| External Alerting | Slack webhook + Gmail SMTP alerts fire on every BLOCK action |
 | CLI Agent Runner | `run_agent.py` — run the agent loop in the terminal without the dashboard |
+| XSS-Safe Dashboard | All user-controlled data (API keys, reasoning text) is HTML-escaped before rendering |
+| Atomic Memory Writes | LongTermMemory uses `os.replace()` for crash-safe JSON persistence |
+| UTC Timestamps | All alert timestamps are in UTC ISO-8601 format |
 
 ---
 
@@ -110,10 +119,11 @@ Most detection systems are stateless pipelines: data goes in, a score comes out.
 
 ```bash
 # 1. Clone & setup
-git clone https://github.com/YOUR_USERNAME/ai-redteam.git
-cd ai-redteam
+git clone https://github.com/NSK-394/Vigil-AI.git
+cd Vigil-AI
 python -m venv .venv
 .\.venv\Scripts\activate          # Windows
+# source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
 
 # 2. Launch dashboard
@@ -185,10 +195,22 @@ Click the buttons in the top bar to switch scenarios instantly:
 
 ---
 
+## Security Notes
+
+The dashboard renders agent reasoning traces and API key identifiers inside HTML blocks. The following hardening is in place:
+
+- All user-controlled strings (API keys, reasoning bodies, summaries, action labels) are escaped with `html.escape()` before injection into `st.markdown` blocks — preventing XSS from crafted API key values in real traffic mode
+- `LongTermMemory._save()` writes to a `.tmp` file and renames atomically via `os.replace()` — a mid-write crash cannot corrupt the memory store
+- Alert timestamps use UTC (`datetime.now(timezone.utc)`) so timestamps are unambiguous across timezones
+- `live_queue.queue_size()` holds the process lock, eliminating a race with concurrent `push()`/`drain()` calls
+- The ingest server caps `request_count` at 100,000 to prevent score manipulation via artificially large values
+
+---
+
 ## Project Structure
 
 ```
-ai-redteam/
+Vigil-AI/
 ├── src/
 │   ├── agents/
 │   │   ├── monitor_agent.py        # Observe: log ingest + memory enrichment
@@ -198,20 +220,25 @@ ai-redteam/
 │   │
 │   ├── memory/
 │   │   ├── short_term.py           # Sliding window per key (velocity, burst detection)
-│   │   └── long_term.py            # Persistent EMA baseline per key (JSON)
+│   │   └── long_term.py            # Persistent EMA baseline per key (JSON, atomic write)
 │   │
 │   ├── core/
 │   │   ├── agent_loop.py           # Orchestrator: one .run() call per cycle
 │   │   ├── confidence.py           # Confidence scoring + weighted fusion
 │   │   └── explainer.py            # Reasoning trace + action justification
 │   │
+│   ├── middleware/
+│   │   ├── fastapi_middleware.py   # Drop-in FastAPI middleware (sliding-window counter)
+│   │   └── ingest_server.py        # HTTP ingest server (port 9000, language-agnostic)
+│   │
 │   ├── simulator.py                # Log generator (4 attack types)
 │   ├── feature_extractor.py        # Per-key feature engineering
 │   ├── risk_engine.py              # Rule-based scoring (0–100)
 │   ├── detector.py                 # IsolationForest anomaly detection
-│   ├── alert_system.py             # In-memory WAF block list
-│   ├── storage.py                  # CSV persistence
-│   └── dashboard.py                # Live SOC terminal UI
+│   ├── alert_system.py             # In-memory WAF block list + Slack/email alerts
+│   ├── live_queue.py               # Cross-process SQLite WAL queue
+│   ├── storage.py                  # CSV persistence (UTF-8)
+│   └── dashboard.py                # Live SOC UI (sparkline, delta KPIs, session totals)
 │
 ├── data/
 │   ├── results.csv                 # Auto-generated each cycle
@@ -219,6 +246,7 @@ ai-redteam/
 │       └── long_term.json          # Persisted agent memory (gitignored)
 │
 ├── run_agent.py                    # CLI agent runner (no dashboard needed)
+├── run_server.py                   # FastAPI ingestion server launcher
 ├── requirements.txt
 └── README.md
 ```
@@ -230,9 +258,11 @@ ai-redteam/
 - **Python 3.12+**
 - **scikit-learn** — IsolationForest anomaly detection
 - **pandas / numpy** — feature engineering and data processing
+- **FastAPI + uvicorn** — real-traffic ingestion server and middleware
+- **httpx** — async Slack webhook delivery
 - **Streamlit** — SOC dashboard UI
 - **streamlit-autorefresh** — 3-second live pipeline cycle
-- **Custom CSS** — terminal-noir aesthetic (VT323 font, CRT scanlines, phosphor green)
+- **SQLite (WAL mode)** — cross-process log queue
 
 ---
 
@@ -248,18 +278,17 @@ This architecture mirrors production security systems:
 | ResponseAgent | WAF enforcement layer (AWS WAF, Cloudflare) |
 | LongTermMemory | Threat intelligence database (MISP, ThreatConnect) |
 | Reasoning traces | SOC analyst audit trail |
+| Ingest Server | API gateway log shipper (Fluentd, Logstash) |
 
 ---
 
 ## 🔮 Future Work
 
-VigilAI's modular agent architecture makes the following extensions straightforward:
-
-- **Real API Ingestion** — Replace the simulator with a FastAPI middleware layer that streams live request logs into `MonitorAgent`, enabling deployment against real traffic without changing any downstream agent
 - **External Threat Intel** — Integrate feeds from MISP or AbuseIPDB into `LongTermMemory` so the agent can cross-reference IPs and API keys against known threat actor databases
 - **LLM-Powered Triage** — Route HIGH-confidence alerts to a Claude/GPT chain that generates a full incident report and suggests remediation steps — closing the loop from detection to operator brief
 - **Distributed Multi-Agent Scaling** — Shard `MonitorAgent` across multiple workers (one per API gateway region), with a central `DecisionAgent` aggregating signals — matching how large SIEMs handle multi-region ingestion
 - **Adversarial Robustness** — Add evasion-detection logic to flag keys that deliberately keep scores near the 50-point ambiguity boundary (slow-drip attacks designed to stay MEDIUM indefinitely)
+- **Persistent Block List** — Move the in-memory WAF block set to SQLite or Redis so blocks survive server restarts
 
 ---
 

@@ -75,9 +75,10 @@ def drain(max_items: int = 5000) -> list[dict]:
 def queue_size() -> int:
     """Return the current number of unprocessed log entries."""
     try:
-        conn = _connect()
-        n = conn.execute("SELECT COUNT(*) FROM log_queue").fetchone()[0]
-        conn.close()
-        return n
+        with _lock:
+            conn = _connect()
+            n = conn.execute("SELECT COUNT(*) FROM log_queue").fetchone()[0]
+            conn.close()
+            return n
     except Exception:
         return 0

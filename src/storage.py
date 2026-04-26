@@ -15,7 +15,7 @@ def _save(data: list[dict], filepath: str, label: str) -> None:
     df         = pd.DataFrame(data)
     file_exists = os.path.isfile(filepath)
     df.to_csv(filepath, mode="a" if file_exists else "w",
-              index=False, header=not file_exists)
+              index=False, header=not file_exists, encoding="utf-8")
     action = "Appended" if file_exists else "Created"
     print(f"[storage] {action} '{filepath}' — {len(df)} {label} row(s).")
 

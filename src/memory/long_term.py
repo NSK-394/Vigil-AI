@@ -7,6 +7,7 @@ The agent uses this to detect repeat offenders and baseline deviations.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -96,8 +97,10 @@ class LongTermMemory:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w") as f:
+        tmp = self._path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             json.dump(self._store, f, indent=2)
+        os.replace(tmp, self._path)
 
     def __repr__(self) -> str:
         return f"LongTermMemory(keys={len(self._store)}, path={self._path})"

@@ -7,6 +7,7 @@ Run: streamlit run src/dashboard.py
 
 import sys
 import os
+import html
 import random
 import pandas as pd
 import streamlit as st
@@ -339,6 +340,12 @@ def _init_state():
         st.session_state["term_logs"] = []
     if "cycle" not in st.session_state:
         st.session_state["cycle"] = 0
+    if "high_history" not in st.session_state:
+        st.session_state["high_history"] = []
+    if "prev_stats" not in st.session_state:
+        st.session_state["prev_stats"] = {}
+    if "session_totals" not in st.session_state:
+        st.session_state["session_totals"] = {"high": 0, "alerts": 0}
 
 _init_state()
 
@@ -364,6 +371,14 @@ def _run_cycle() -> dict:
 
 def _label_color(label: str) -> str:
     return {"HIGH": "#f85149", "MEDIUM": "#d29922", "LOW": "#3fb950"}.get(str(label).upper(), "#e6edf3")
+
+def _sparkline(values: list) -> str:
+    """Render a list of ints as a Unicode block sparkline."""
+    if not values:
+        return ""
+    blocks = "▁▂▃▄▅▆▇█"
+    peak = max(values) if max(values) > 0 else 1
+    return "".join(blocks[min(int(v / peak * 7), 7)] for v in values)
 
 def _action_cls(action: str) -> str:
     return f"act-{action}" if action in ("BLOCK", "RATE_LIMIT", "ALERT", "LOG") else "act-LOG"
@@ -398,16 +413,16 @@ def _update_term_logs(logs_df: pd.DataFrame):
 
 def _render_log_html(lines: list) -> str:
     now = datetime.now()
-    html = ""
+    _out = ""
     for i, (cls, msg) in enumerate(lines):
         ts = (now - timedelta(seconds=len(lines) - i)).strftime("%H:%M:%S")
-        html += f'<div class="{cls}"><span class="log-ts">[{ts}]</span>{msg}</div>'
-    return html
+        _out += f'<div class="{cls}"><span class="log-ts">[{ts}]</span>{html.escape(msg)}</div>'
+    return _out
 
 
 # ── Section renderers ─────────────────────────────────────────────────────────
 
-def render_topbar(mode: str, cycle: int, total_keys: int):
+def render_topbar(mode: str, cycle: int, total_keys: int, high_history: list, session_totals: dict):
     now = datetime.now()
     mode_meta = {
         "normal":     ("mode-normal",     "● Normal"),
@@ -415,6 +430,9 @@ def render_topbar(mode: str, cycle: int, total_keys: int):
         "attack":     ("mode-attack",     "● Under Attack"),
     }
     badge_cls, badge_txt = mode_meta[mode]
+    spark = _sparkline(high_history[-16:]) if high_history else "—"
+    ses_high   = session_totals.get("high", 0)
+    ses_alerts = session_totals.get("alerts", 0)
 
     col_title, col_mode, col_status = st.columns([3.5, 2.0, 1.4])
 
@@ -424,6 +442,15 @@ def render_topbar(mode: str, cycle: int, total_keys: int):
         <div class="topbar-sub">
             Autonomous API Threat Detection &nbsp;·&nbsp;
             {now.strftime("%Y-%m-%d %H:%M:%S")} &nbsp;·&nbsp; Cycle #{cycle}
+        </div>
+        <div style="margin-top:6px; font-family:'JetBrains Mono',monospace; font-size:0.68rem;
+                    color:var(--muted); letter-spacing:0.04em">
+            HIGH trend:
+            <span style="color:#f85149; letter-spacing:0.02em">{spark}</span>
+            &nbsp;·&nbsp; session threats:
+            <span style="color:#f85149">{ses_high}</span>
+            &nbsp;·&nbsp; alerts:
+            <span style="color:#d29922">{ses_alerts}</span>
         </div>""", unsafe_allow_html=True)
 
     with col_mode:
@@ -450,22 +477,35 @@ def render_topbar(mode: str, cycle: int, total_keys: int):
         </div>""", unsafe_allow_html=True)
 
 
-def render_kpi_strip(total_keys, high_count, medium_count, low_count, total_reqs, avg_conf):
+def render_kpi_strip(total_keys, high_count, medium_count, low_count, total_reqs, avg_conf, prev: dict | None = None):
+    prev = prev or {}
+    def _delta(cur: int | float, key: str, fmt: str = "d") -> str:
+        if key not in prev:
+            return ""
+        d = cur - prev[key]
+        if d == 0:
+            return '<div style="font-size:0.6rem; color:var(--muted); margin-top:2px">— same</div>'
+        color = "#f85149" if d > 0 else "#3fb950"
+        arrow = "▲" if d > 0 else "▼"
+        val   = f"{d:+d}" if fmt == "d" else f"{d:+.0%}"
+        return f'<div style="font-size:0.6rem; color:{color}; margin-top:2px">{arrow} {val}</div>'
+
     kpis = [
-        (str(total_keys),     "Keys Monitored", "#58a6ff"),
-        (str(high_count),     "High Threats",   "#f85149"),
-        (str(medium_count),   "Medium",         "#d29922"),
-        (str(low_count),      "Clear",          "#3fb950"),
-        (f"{total_reqs:,}",   "Total Requests", "#7d8590"),
-        (f"{avg_conf:.0%}",   "Avg Confidence", "#bc8cff"),
+        (str(total_keys),   "Keys Monitored", "#58a6ff", _delta(total_keys,   "total_keys")),
+        (str(high_count),   "High Threats",   "#f85149", _delta(high_count,   "high")),
+        (str(medium_count), "Medium",         "#d29922", _delta(medium_count, "medium")),
+        (str(low_count),    "Clear",          "#3fb950", _delta(low_count,    "low")),
+        (f"{total_reqs:,}", "Total Requests", "#7d8590", _delta(total_reqs,   "total_reqs")),
+        (f"{avg_conf:.0%}", "Avg Confidence", "#bc8cff", _delta(avg_conf,     "avg_conf", "f")),
     ]
     cols = st.columns(6)
-    for col, (val, lbl, color) in zip(cols, kpis):
+    for col, (val, lbl, color, delta_html) in zip(cols, kpis):
         with col:
             st.markdown(f"""
             <div class="kpi-card">
                 <div class="kpi-val" style="color:{color}">{val}</div>
                 <div class="kpi-lbl">{lbl}</div>
+                {delta_html}
             </div>""", unsafe_allow_html=True)
 
 
@@ -485,12 +525,12 @@ def render_threat_table(sorted_results: pd.DataFrame):
         rows_html += f"""
         <tr>
             <td style="font-family:'JetBrains Mono',monospace; font-size:0.73rem;
-                color:{color}">{row['api_key']}</td>
+                color:{color}">{html.escape(str(row['api_key']))}</td>
             <td><span class="pill pill-{label}">{label}</span></td>
             <td>{bar}</td>
             <td style="text-align:center; color:#bc8cff; font-family:'JetBrains Mono',monospace;
                 font-size:0.72rem">{conf:.0%}</td>
-            <td class="{_action_cls(action)}" style="font-size:0.72rem">{action}</td>
+            <td class="{_action_cls(action)}" style="font-size:0.72rem">{html.escape(action)}</td>
         </tr>"""
 
     st.markdown(f"""
@@ -506,8 +546,8 @@ def render_threat_table(sorted_results: pd.DataFrame):
 
 def render_terminal(logs_df: pd.DataFrame):
     _update_term_logs(logs_df)
-    html = _render_log_html(st.session_state["term_logs"])
-    st.markdown(f'<div class="log-box">{html}</div>', unsafe_allow_html=True)
+    _content = _render_log_html(st.session_state["term_logs"])
+    st.markdown(f'<div class="log-box">{_content}</div>', unsafe_allow_html=True)
     st.markdown('<div style="font-size:0.62rem; color:var(--muted); margin-top:4px">'
                 '▶ live stream · auto-refresh 3s</div>', unsafe_allow_html=True)
 
@@ -552,14 +592,16 @@ def render_insight_panel(results_df: pd.DataFrame):
         if obs:
             tags += f'<span style="color:var(--muted); font-size:0.63rem; margin-left:8px">{obs} observations</span>'
 
-        body_start  = reasoning.find("] — ")
-        reason_body = reasoning[body_start + 4:] if body_start >= 0 else reasoning
+        # strip the "[LABEL | conf=X | fused=Y] — " header; handle encoding variants of em dash
+        _sep = next((s for s in ("] — ", "] – ", "] � ", "] - ") if s in reasoning), None)
+        reason_body = reasoning[reasoning.index(_sep) + len(_sep):] if _sep else reasoning
+        reason_body = html.escape(reason_body)
 
         st.markdown(f"""
         <div class="insight-panel" style="border-left-color:{color}">
             <div class="insight-label">
                 Agent Reasoning Trace &nbsp;·&nbsp;
-                <span style="color:{color}; font-family:'JetBrains Mono',monospace">{selected_key}</span>
+                <span style="color:{color}; font-family:'JetBrains Mono',monospace">{html.escape(selected_key)}</span>
                 {tags}
             </div>
             <div style="line-height:1.8; color:var(--text); border-bottom:1px solid var(--border);
@@ -568,8 +610,8 @@ def render_insight_panel(results_df: pd.DataFrame):
             </div>
             <div class="insight-label">Action Justification</div>
             <div style="font-size:0.75rem;">
-                <span style="color:{action_color}; font-weight:600">[{action}]</span>
-                &nbsp;— {action_rsn}
+                <span style="color:{action_color}; font-weight:600">[{html.escape(action)}]</span>
+                &nbsp;— {html.escape(action_rsn)}
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -619,15 +661,15 @@ def render_high_traces(decisions: list):
         action = d.get("action", "BLOCK")
         action_color = "#f85149" if action == "BLOCK" else "#d29922"
         reasoning = str(d.get("reasoning", ""))
-        body_start = reasoning.find("] — ")
-        body = reasoning[body_start + 4:] if body_start >= 0 else reasoning
+        _sep = next((s for s in ("] — ", "] – ", "] � ", "] - ") if s in reasoning), None)
+        body = html.escape(reasoning[reasoning.index(_sep) + len(_sep):] if _sep else reasoning)
         rep_html = ('<div style="color:#f85149; font-size:0.62rem; margin-top:4px; font-weight:600">'
                     'REPEAT OFFENDER</div>' if d.get("repeat_offender") else "")
         with col:
             st.markdown(f"""
             <div class="insight-panel" style="border-left-color:#f85149; padding:10px 12px">
                 <div style="font-family:'JetBrains Mono',monospace; font-size:0.7rem;
-                    color:#f85149; margin-bottom:4px">{d['api_key']}</div>
+                    color:#f85149; margin-bottom:4px">{html.escape(str(d['api_key']))}</div>
                 <div style="font-size:0.8rem; font-weight:600; color:{action_color};
                     margin-bottom:6px">{action}
                     <span style="color:#bc8cff; font-size:0.7rem; font-weight:400">
@@ -662,14 +704,14 @@ def render_roster(results_df: pd.DataFrame):
         summ   = str(row.get("summary", ""))
         rows += f"""
         <tr>
-            <td style="font-family:'JetBrains Mono',monospace; color:{color}; font-size:0.73rem">{row['api_key']}</td>
+            <td style="font-family:'JetBrains Mono',monospace; color:{color}; font-size:0.73rem">{html.escape(str(row['api_key']))}</td>
             <td><span class="pill pill-{lbl}">{lbl}</span></td>
             <td>{_score_bar(risk, color)}</td>
             <td style="font-family:'JetBrains Mono',monospace; color:#d29922; text-align:right; font-size:0.72rem">{int(anom)}</td>
             <td style="font-family:'JetBrains Mono',monospace; color:#bc8cff; text-align:center; font-size:0.72rem">{conf:.0%}</td>
-            <td class="{_action_cls(action)}" style="font-size:0.72rem">{action}</td>
+            <td class="{_action_cls(action)}" style="font-size:0.72rem">{html.escape(action)}</td>
             <td style="color:var(--muted); font-size:0.68rem; max-width:160px; overflow:hidden;
-                text-overflow:ellipsis; white-space:nowrap">{summ}</td>
+                text-overflow:ellipsis; white-space:nowrap">{html.escape(summ)}</td>
         </tr>"""
 
     st.markdown(f"""
@@ -699,20 +741,20 @@ def render_alerts(alerts: list, blocked_keys: list):
                 sev       = a.get("severity", "CRITICAL")
                 sev_color = {"CRITICAL":"#f85149","WARNING":"#d29922","INFO":"#58a6ff"}.get(sev,"#f85149")
                 reasoning = str(a.get("reasoning", ""))
-                body_s    = reasoning.find("] — ")
-                body      = reasoning[body_s + 4:] if body_s >= 0 else reasoning
+                _sep = next((s for s in ("] — ", "] – ", "] � ", "] - ") if s in reasoning), None)
+                body = html.escape(reasoning[reasoning.index(_sep) + len(_sep):] if _sep else reasoning)
                 st.markdown(f"""
                 <div class="alert-card" style="border-left-color:{sev_color}">
                     <div style="display:flex; justify-content:space-between; margin-bottom:4px">
                         <span style="color:{sev_color}; font-weight:600; font-size:0.75rem">
-                            [{sev}] {a['api_key']}</span>
+                            [{sev}] {html.escape(a['api_key'])}</span>
                         <span style="color:var(--muted); font-size:0.65rem">{a.get('timestamp','')}</span>
                     </div>
                     <div style="font-size:0.7rem; color:var(--muted); margin-bottom:4px">
                         Risk: <span style="color:{sev_color}">{a.get('risk_score',0)}</span>
                         &nbsp;·&nbsp; Anomaly: <span style="color:#d29922">{a.get('anomaly_score',0)}</span>
                         &nbsp;·&nbsp; Conf: <span style="color:#bc8cff">{float(a.get('confidence',0)):.0%}</span>
-                        &nbsp;·&nbsp; <span style="color:{sev_color}; font-weight:600">{a['action']}</span>
+                        &nbsp;·&nbsp; <span style="color:{sev_color}; font-weight:600">{html.escape(a['action'])}</span>
                     </div>
                     <div style="font-size:0.68rem; color:var(--muted); line-height:1.7;
                         border-top:1px solid var(--border); padding-top:4px">
@@ -727,7 +769,7 @@ def render_alerts(alerts: list, blocked_keys: list):
             st.markdown('<div style="color:var(--muted); font-size:0.75rem">No keys blocked yet.</div>',
                         unsafe_allow_html=True)
         else:
-            items = "".join(f'<div class="blocked-key">⊘ {k}</div>' for k in blocked_keys[:20])
+            items = "".join(f'<div class="blocked-key">⊘ {html.escape(k)}</div>' for k in blocked_keys[:20])
             st.markdown(f"""
             <div style="background:var(--bg2); border:1px solid var(--border); border-radius:6px;
                         padding:10px 14px; max-height:260px; overflow-y:auto">
@@ -765,6 +807,7 @@ if _is_empty and "last_result" in st.session_state:
     result    = st.session_state["last_result"]
     _stale    = True
 elif not _is_empty:
+    st.session_state["prev_stats"] = dict(st.session_state.get("_cur_stats", {}))
     st.session_state["last_result"] = result
     _stale = False
 else:
@@ -786,12 +829,33 @@ total_keys   = len(results_df)
 total_reqs   = int(logs_df["request_count"].sum()) if "request_count" in logs_df.columns else 0
 avg_conf     = float(stats.get("avg_confidence", 0.0))
 
+# Accumulate session totals and history on fresh cycles only
+if not _stale and not _is_empty:
+    st.session_state["_cur_stats"] = {
+        "total_keys": total_keys, "high": high_count, "medium": medium_count,
+        "low": low_count, "total_reqs": total_reqs, "avg_conf": avg_conf,
+    }
+    _hs = st.session_state["high_history"]
+    _hs.append(high_count)
+    if len(_hs) > 30:
+        _hs.pop(0)
+    st.session_state["session_totals"]["high"]   += high_count
+    st.session_state["session_totals"]["alerts"] += len(alerts)
+
 label_order    = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 sorted_results = results_df.copy()
 if not sorted_results.empty and "final_label" in sorted_results.columns and "risk_score" in sorted_results.columns:
     sorted_results["_ord"] = sorted_results["final_label"].map(label_order)
     sorted_results = sorted_results.sort_values(["_ord", "risk_score"],
                                                 ascending=[True, False]).drop(columns="_ord")
+
+# Error banner — show if cycle raised an exception
+if result.get("error"):
+    st.markdown(f"""
+    <div style="background:#1c2128; border:1px solid #f85149; border-left:3px solid #f85149;
+                border-radius:6px; padding:10px 16px; font-size:0.78rem; color:#f85149; margin-bottom:8px">
+        ⚠️ <strong>Agent cycle error</strong> — {html.escape(str(result['error']))}
+    </div>""", unsafe_allow_html=True)
 
 # Status banner — real-traffic waiting / stale notice
 if source == "real" and _is_empty and "last_result" not in st.session_state:
@@ -812,10 +876,13 @@ elif source == "real" and _stale:
 
 # ── Render ────────────────────────────────────────────────────────────────────
 
-render_topbar(mode, cycle, total_keys)
+render_topbar(mode, cycle, total_keys,
+              high_history=st.session_state["high_history"],
+              session_totals=st.session_state["session_totals"])
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-render_kpi_strip(total_keys, high_count, medium_count, low_count, total_reqs, avg_conf)
+render_kpi_strip(total_keys, high_count, medium_count, low_count, total_reqs, avg_conf,
+                 prev=st.session_state["prev_stats"])
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 col_log, col_table = st.columns([1, 1], gap="large")

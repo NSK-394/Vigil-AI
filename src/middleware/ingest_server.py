@@ -67,7 +67,7 @@ async def ingest(request: Request) -> JSONResponse:
             "timestamp",
             datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         ),
-        "request_count": int(data.get("request_count", 1)),
+        "request_count": min(int(data.get("request_count", 1)), 100_000),
         "attack_type":   data.get("attack_type", "real"),
     }
 
