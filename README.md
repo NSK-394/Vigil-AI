@@ -5,7 +5,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-ingest-009688?logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-SOC_dashboard-FF4B4B?logo=streamlit&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-WAL_queue-003B57?logo=sqlite&logoColor=white)
-![Product Hunt](https://img.shields.io/badge/Product_Hunt-launched-DA552F?logo=producthunt&logoColor=white)
+[![Product Hunt](https://img.shields.io/badge/Product_Hunt-launched-DA552F?logo=producthunt&logoColor=white)](https://www.producthunt.com/products/vigil-ai)
 
 Vigil detects and responds to API abuse without a human in the loop: four agents
 (**Monitor → Detection → Decision → Response**) run a continuous cycle that fuses
@@ -14,7 +14,7 @@ weighted by each engine's own confidence. Per-key behavioral memory persists acr
 restarts, so repeat offenders escalate automatically — and every verdict carries a
 full reasoning trace stating which signals fired and with what confidence.
 
-Launched on Product Hunt · [landing page](https://vigil-landing-page.vercel.app)
+[Launched on Product Hunt](https://www.producthunt.com/products/vigil-ai) · [landing page](https://vigil-landing-page.vercel.app)
 
 ![Live SOC dashboard](docs/soc-dashboard.png)
 
